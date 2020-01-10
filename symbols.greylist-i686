@@ -1,0 +1,9 @@
+__bitmap_full
+bitmap_clear
+bitmap_find_next_zero_area
+bitmap_set
+iomap_create_wc
+iomap_free
+radix_tree_delete
+radix_tree_insert
+radix_tree_lookup

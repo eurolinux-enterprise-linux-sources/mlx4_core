@@ -1,0 +1,301 @@
+This patch does the following:
+- revert: IB/mlx4: Add support for XRC domains (commit a4081c33)
+- revert: IB/mlx4: Add support for XRC QPs (commit 890e500f)
+- revert: IB/mlx4: Add support for XRC SRQs (commit 006ac0de)
+
+---
+ drivers/net/mlx4/fw.c       |    6 ------
+ drivers/net/mlx4/fw.h       |    2 --
+ drivers/net/mlx4/main.c     |   18 +-----------------
+ drivers/net/mlx4/mlx4.h     |   17 +++++++----------
+ drivers/net/mlx4/pd.c       |   30 ------------------------------
+ drivers/net/mlx4/qp.c       |    3 ---
+ drivers/net/mlx4/srq.c      |    6 ++----
+ include/linux/mlx4/device.h |    9 ++-------
+ include/linux/mlx4/qp.h     |    3 +--
+ 9 files changed, 13 insertions(+), 81 deletions(-)
+
+--- a/drivers/net/mlx4/fw.c
++++ b/drivers/net/mlx4/fw.c
+@@ -372,8 +372,6 @@ int mlx4_QUERY_DEV_CAP(struct mlx4_dev *
+ #define QUERY_DEV_CAP_MAX_MCG_OFFSET		0x63
+ #define QUERY_DEV_CAP_RSVD_PD_OFFSET		0x64
+ #define QUERY_DEV_CAP_MAX_PD_OFFSET		0x65
+-#define QUERY_DEV_CAP_RSVD_XRC_OFFSET		0x66
+-#define QUERY_DEV_CAP_MAX_XRC_OFFSET		0x67
+ #define QUERY_DEV_CAP_MAX_COUNTERS_OFFSET	0x68
+ #define QUERY_DEV_CAP_RDMARC_ENTRY_SZ_OFFSET	0x80
+ #define QUERY_DEV_CAP_QPC_ENTRY_SZ_OFFSET	0x82
+@@ -488,10 +486,6 @@ int mlx4_QUERY_DEV_CAP(struct mlx4_dev *
+ 	dev_cap->reserved_pds = field >> 4;
+ 	MLX4_GET(field, outbox, QUERY_DEV_CAP_MAX_PD_OFFSET);
+ 	dev_cap->max_pds = 1 << (field & 0x3f);
+-	MLX4_GET(field, outbox, QUERY_DEV_CAP_RSVD_XRC_OFFSET);
+-	dev_cap->reserved_xrcds = field >> 4;
+-	MLX4_GET(field, outbox, QUERY_DEV_CAP_MAX_PD_OFFSET);
+-	dev_cap->max_xrcds = 1 << (field & 0x1f);
+ 
+ 	MLX4_GET(size, outbox, QUERY_DEV_CAP_RDMARC_ENTRY_SZ_OFFSET);
+ 	dev_cap->rdmarc_entry_sz = size;
+--- a/drivers/net/mlx4/fw.h
++++ b/drivers/net/mlx4/fw.h
+@@ -89,8 +89,6 @@ struct mlx4_dev_cap {
+ 	int max_mcgs;
+ 	int reserved_pds;
+ 	int max_pds;
+-	int reserved_xrcds;
+-	int max_xrcds;
+ 	int qpc_entry_sz;
+ 	int rdmarc_entry_sz;
+ 	int altc_entry_sz;
+--- a/drivers/net/mlx4/main.c
++++ b/drivers/net/mlx4/main.c
+@@ -313,10 +313,6 @@ static int mlx4_dev_cap(struct mlx4_dev 
+ 	/* The first 128 UARs are used for EQ doorbells */
+ 	dev->caps.reserved_uars	     = max_t(int, 128, dev_cap->reserved_uars);
+ 	dev->caps.reserved_pds	     = dev_cap->reserved_pds;
+-	dev->caps.reserved_xrcds     = (dev->caps.flags & MLX4_DEV_CAP_FLAG_XRC) ?
+-					dev_cap->reserved_xrcds : 0;
+-	dev->caps.max_xrcds          = (dev->caps.flags & MLX4_DEV_CAP_FLAG_XRC) ?
+-					dev_cap->max_xrcds : 0;
+ 	dev->caps.mtt_entry_sz       = dev_cap->mtt_entry_sz;
+ 
+ 	dev->caps.max_msg_sz         = dev_cap->max_msg_sz;
+@@ -1323,18 +1319,11 @@ static int mlx4_setup_hca(struct mlx4_de
+ 		goto err_kar_unmap;
+ 	}
+ 
+-	err = mlx4_init_xrcd_table(dev);
+-	if (err) {
+-		mlx4_err(dev, "Failed to initialize "
+-			 "reliable connection domain table, aborting.\n");
+-		goto err_pd_table_free;
+-	}
+-
+ 	err = mlx4_init_mr_table(dev);
+ 	if (err) {
+ 		mlx4_err(dev, "Failed to initialize "
+ 			 "memory region table, aborting.\n");
+-		goto err_xrcd_table_free;
++		goto err_pd_table_free;
+ 	}
+ 
+ 	err = mlx4_init_eq_table(dev);
+@@ -1459,9 +1448,6 @@ err_eq_table_free:
+ err_mr_table_free:
+ 	mlx4_cleanup_mr_table(dev);
+ 
+-err_xrcd_table_free:
+-	mlx4_cleanup_xrcd_table(dev);
+-
+ err_pd_table_free:
+ 	mlx4_cleanup_pd_table(dev);
+ 
+@@ -1937,7 +1923,6 @@ err_port:
+ 	mlx4_cmd_use_polling(dev);
+ 	mlx4_cleanup_eq_table(dev);
+ 	mlx4_cleanup_mr_table(dev);
+-	mlx4_cleanup_xrcd_table(dev);
+ 	mlx4_cleanup_pd_table(dev);
+ 	mlx4_cleanup_uar_table(dev);
+ 
+@@ -2027,7 +2012,6 @@ static void mlx4_remove_one(struct pci_d
+ 		mlx4_cmd_use_polling(dev);
+ 		mlx4_cleanup_eq_table(dev);
+ 		mlx4_cleanup_mr_table(dev);
+-		mlx4_cleanup_xrcd_table(dev);
+ 		mlx4_cleanup_pd_table(dev);
+ 
+ 		if (mlx4_is_master(dev))
+--- a/drivers/net/mlx4/mlx4.h
++++ b/drivers/net/mlx4/mlx4.h
+@@ -295,20 +295,20 @@ struct mlx4_cq_context {
+ struct mlx4_srq_context {
+ 	__be32			state_logsize_srqn;
+ 	u8			logstride;
+-	u8			reserved1;
+-	__be16			xrcd;
+-	__be32			pg_offset_cqn;
+-	u32			reserved2;
++	u8			reserved1[3];
++	u8			pg_offset;
++	u8			reserved2[3];
++	u32			reserved3;
+ 	u8			log_page_size;
+-	u8			reserved3[2];
++	u8			reserved4[2];
+ 	u8			mtt_base_addr_h;
+ 	__be32			mtt_base_addr_l;
+ 	__be32			pd;
+ 	__be16			limit_watermark;
+ 	__be16			wqe_cnt;
+-	u16			reserved4;
++	u16			reserved5;
+ 	__be16			wqe_counter;
+-	u32			reserved5;
++	u32			reserved6;
+ 	__be64			db_rec_addr;
+ };
+ 
+@@ -720,7 +720,6 @@ struct mlx4_priv {
+ 	struct mlx4_mfunc	mfunc;
+ 
+ 	struct mlx4_bitmap	pd_bitmap;
+-	struct mlx4_bitmap	xrcd_bitmap;
+ 	struct mlx4_uar_table	uar_table;
+ 	struct mlx4_mr_table	mr_table;
+ 	struct mlx4_cq_table	cq_table;
+@@ -771,7 +770,6 @@ int mlx4_alloc_eq_table(struct mlx4_dev 
+ void mlx4_free_eq_table(struct mlx4_dev *dev);
+ 
+ int mlx4_init_pd_table(struct mlx4_dev *dev);
+-int mlx4_init_xrcd_table(struct mlx4_dev *dev);
+ int mlx4_init_uar_table(struct mlx4_dev *dev);
+ int mlx4_init_mr_table(struct mlx4_dev *dev);
+ int mlx4_init_eq_table(struct mlx4_dev *dev);
+@@ -781,7 +779,6 @@ int mlx4_init_srq_table(struct mlx4_dev 
+ int mlx4_init_mcg_table(struct mlx4_dev *dev);
+ 
+ void mlx4_cleanup_pd_table(struct mlx4_dev *dev);
+-void mlx4_cleanup_xrcd_table(struct mlx4_dev *dev);
+ void mlx4_cleanup_uar_table(struct mlx4_dev *dev);
+ void mlx4_cleanup_mr_table(struct mlx4_dev *dev);
+ void mlx4_cleanup_eq_table(struct mlx4_dev *dev);
+--- a/drivers/net/mlx4/pd.c
++++ b/drivers/net/mlx4/pd.c
+@@ -62,24 +62,6 @@ void mlx4_pd_free(struct mlx4_dev *dev, 
+ }
+ EXPORT_SYMBOL_GPL(mlx4_pd_free);
+ 
+-int mlx4_xrcd_alloc(struct mlx4_dev *dev, u32 *xrcdn)
+-{
+-	struct mlx4_priv *priv = mlx4_priv(dev);
+-
+-	*xrcdn = mlx4_bitmap_alloc(&priv->xrcd_bitmap);
+-	if (*xrcdn == -1)
+-		return -ENOMEM;
+-
+-	return 0;
+-}
+-EXPORT_SYMBOL_GPL(mlx4_xrcd_alloc);
+-
+-void mlx4_xrcd_free(struct mlx4_dev *dev, u32 xrcdn)
+-{
+-	mlx4_bitmap_free(&mlx4_priv(dev)->xrcd_bitmap, xrcdn);
+-}
+-EXPORT_SYMBOL_GPL(mlx4_xrcd_free);
+-
+ int mlx4_init_pd_table(struct mlx4_dev *dev)
+ {
+ 	struct mlx4_priv *priv = mlx4_priv(dev);
+@@ -94,18 +76,6 @@ void mlx4_cleanup_pd_table(struct mlx4_d
+ 	mlx4_bitmap_cleanup(&mlx4_priv(dev)->pd_bitmap);
+ }
+ 
+-int mlx4_init_xrcd_table(struct mlx4_dev *dev)
+-{
+-	struct mlx4_priv *priv = mlx4_priv(dev);
+-
+-	return mlx4_bitmap_init(&priv->xrcd_bitmap, (1 << 16),
+-				(1 << 16) - 1, dev->caps.reserved_xrcds + 1, 0);
+-}
+-
+-void mlx4_cleanup_xrcd_table(struct mlx4_dev *dev)
+-{
+-	mlx4_bitmap_cleanup(&mlx4_priv(dev)->xrcd_bitmap);
+-}
+ 
+ int mlx4_uar_alloc(struct mlx4_dev *dev, struct mlx4_uar *uar)
+ {
+--- a/drivers/net/mlx4/qp.c
++++ b/drivers/net/mlx4/qp.c
+@@ -401,9 +401,6 @@ int mlx4_init_qp_table(struct mlx4_dev *
+ 	 * We reserve 2 extra QPs per port for the special QPs.  The
+ 	 * block of special QPs must be aligned to a multiple of 8, so
+ 	 * round up.
+-	 *
+-	 * We also reserve the MSB of the 24-bit QP number to indicate
+-	 * that a QP is an XRC QP.
+ 	 */
+ 	dev->caps.sqp_start =
+ 		ALIGN(dev->caps.reserved_qps_cnt[MLX4_QP_REGION_FW], 8);
+--- a/drivers/net/mlx4/srq.c
++++ b/drivers/net/mlx4/srq.c
+@@ -160,8 +160,8 @@ static void mlx4_srq_free_icm(struct mlx
+ 	__mlx4_srq_free_icm(dev, srqn);
+ }
+ 
+-int mlx4_srq_alloc(struct mlx4_dev *dev, u32 pdn, u32 cqn, u16 xrcd,
+-		   struct mlx4_mtt *mtt, u64 db_rec, struct mlx4_srq *srq)
++int mlx4_srq_alloc(struct mlx4_dev *dev, u32 pdn, struct mlx4_mtt *mtt,
++		   u64 db_rec, struct mlx4_srq *srq)
+ {
+ 	struct mlx4_srq_table *srq_table = &mlx4_priv(dev)->srq_table;
+ 	struct mlx4_cmd_mailbox *mailbox;
+@@ -191,8 +191,6 @@ int mlx4_srq_alloc(struct mlx4_dev *dev,
+ 	srq_context->state_logsize_srqn = cpu_to_be32((ilog2(srq->max) << 24) |
+ 						      srq->srqn);
+ 	srq_context->logstride          = srq->wqe_shift - 4;
+-	srq_context->xrcd		= cpu_to_be16(xrcd);
+-	srq_context->pg_offset_cqn	= cpu_to_be32(cqn & 0xffffff);
+ 	srq_context->log_page_size      = mtt->page_shift - MLX4_ICM_PAGE_SHIFT;
+ 
+ 	mtt_addr = mlx4_mtt_addr(dev, mtt);
+--- a/include/linux/mlx4/device.h
++++ b/include/linux/mlx4/device.h
+@@ -73,7 +73,6 @@ enum {
+ 	MLX4_DEV_CAP_FLAG_RC		= 1LL <<  0,
+ 	MLX4_DEV_CAP_FLAG_UC		= 1LL <<  1,
+ 	MLX4_DEV_CAP_FLAG_UD		= 1LL <<  2,
+-	MLX4_DEV_CAP_FLAG_XRC		= 1LL <<  3,
+ 	MLX4_DEV_CAP_FLAG_SRQ		= 1LL <<  6,
+ 	MLX4_DEV_CAP_FLAG_IPOIB_CSUM	= 1LL <<  7,
+ 	MLX4_DEV_CAP_FLAG_BAD_PKEY_CNTR	= 1LL <<  8,
+@@ -280,8 +279,6 @@ struct mlx4_caps {
+ 	int			num_qp_per_mgm;
+ 	int			num_pds;
+ 	int			reserved_pds;
+-	int			max_xrcds;
+-	int			reserved_xrcds;
+ 	int			mtt_entry_sz;
+ 	u32			max_msg_sz;
+ 	u32			page_size_cap;
+@@ -548,8 +545,6 @@ static inline void *mlx4_buf_offset(stru
+ 
+ int mlx4_pd_alloc(struct mlx4_dev *dev, u32 *pdn);
+ void mlx4_pd_free(struct mlx4_dev *dev, u32 pdn);
+-int mlx4_xrcd_alloc(struct mlx4_dev *dev, u32 *xrcdn);
+-void mlx4_xrcd_free(struct mlx4_dev *dev, u32 xrcdn);
+ 
+ int mlx4_uar_alloc(struct mlx4_dev *dev, struct mlx4_uar *uar);
+ void mlx4_uar_free(struct mlx4_dev *dev, struct mlx4_uar *uar);
+@@ -589,8 +584,8 @@ void mlx4_qp_release_range(struct mlx4_d
+ int mlx4_qp_alloc(struct mlx4_dev *dev, int qpn, struct mlx4_qp *qp);
+ void mlx4_qp_free(struct mlx4_dev *dev, struct mlx4_qp *qp);
+ 
+-int mlx4_srq_alloc(struct mlx4_dev *dev, u32 pdn, u32 cqn, u16 xrcdn,
+-		   struct mlx4_mtt *mtt, u64 db_rec, struct mlx4_srq *srq);
++int mlx4_srq_alloc(struct mlx4_dev *dev, u32 pdn, struct mlx4_mtt *mtt,
++		   u64 db_rec, struct mlx4_srq *srq);
+ void mlx4_srq_free(struct mlx4_dev *dev, struct mlx4_srq *srq);
+ int mlx4_srq_arm(struct mlx4_dev *dev, struct mlx4_srq *srq, int limit_watermark);
+ int mlx4_srq_query(struct mlx4_dev *dev, struct mlx4_srq *srq, int *limit_watermark);
+--- a/include/linux/mlx4/qp.h
++++ b/include/linux/mlx4/qp.h
+@@ -75,7 +75,6 @@ enum {
+ 	MLX4_QP_ST_UC				= 0x1,
+ 	MLX4_QP_ST_RD				= 0x2,
+ 	MLX4_QP_ST_UD				= 0x3,
+-	MLX4_QP_ST_XRC				= 0x6,
+ 	MLX4_QP_ST_MLX				= 0x7
+ };
+ 
+@@ -165,7 +164,7 @@ struct mlx4_qp_context {
+ 	__be32			ssn;
+ 	__be32			params2;
+ 	__be32			rnr_nextrecvpsn;
+-	__be32			xrcd;
++	__be32			srcd;
+ 	__be32			cqn_recv;
+ 	__be64			db_rec_addr;
+ 	__be32			qkey;
